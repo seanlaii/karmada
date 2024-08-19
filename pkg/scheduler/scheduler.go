@@ -38,6 +38,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
@@ -54,6 +55,7 @@ import (
 	frameworkplugins "github.com/karmada-io/karmada/pkg/scheduler/framework/plugins"
 	"github.com/karmada-io/karmada/pkg/scheduler/framework/runtime"
 	"github.com/karmada-io/karmada/pkg/scheduler/metrics"
+	"github.com/karmada-io/karmada/pkg/scheduler/priorityqueue"
 	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/grpcconnection"
@@ -103,6 +105,7 @@ type Scheduler struct {
 
 	eventRecorder record.EventRecorder
 
+	enablePriorityQueue                 bool
 	enableSchedulerEstimator            bool
 	disableSchedulerEstimatorInPullMode bool
 	schedulerEstimatorCache             *estimatorclient.SchedulerEstimatorCache
@@ -115,6 +118,8 @@ type Scheduler struct {
 }
 
 type schedulerOptions struct {
+	// enablePriorityQueue represents whether the priority queue should be enabled.
+	enablePriorityQueue bool
 	// enableSchedulerEstimator represents whether the accurate scheduler estimator should be enabled.
 	enableSchedulerEstimator bool
 	// disableSchedulerEstimatorInPullMode represents whether to disable the scheduler estimator in pull mode.
@@ -139,6 +144,13 @@ type schedulerOptions struct {
 
 // Option configures a Scheduler
 type Option func(*schedulerOptions)
+
+// WithEnablePriorityQueue sets the enablePriorityQueue for scheduler
+func WithEnablePriorityQueue(enablePriorityQueue bool) Option {
+	return func(o *schedulerOptions) {
+		o.enablePriorityQueue = enablePriorityQueue
+	}
+}
 
 // WithEnableSchedulerEstimator sets the enableSchedulerEstimator for scheduler
 func WithEnableSchedulerEstimator(enableSchedulerEstimator bool) Option {
@@ -229,7 +241,33 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 	for _, opt := range opts {
 		opt(&options)
 	}
-	queue := workqueue.NewRateLimitingQueueWithConfig(ratelimiterflag.DefaultControllerRateLimiter(options.RateLimiterOptions), workqueue.RateLimitingQueueConfig{Name: "scheduler-queue"})
+	clock := clock.RealClock{}
+	queueName := "scheduler-queue"
+	var rateLimitingQueueConfig workqueue.RateLimitingQueueConfig
+	if options.enablePriorityQueue {
+		rateLimitingQueueConfig = workqueue.RateLimitingQueueConfig{
+			Name:  queueName,
+			Clock: clock,
+			DelayingQueue: workqueue.NewDelayingQueueWithConfig(
+				workqueue.DelayingQueueConfig{
+					Name:  queueName,
+					Clock: clock,
+					Queue: priorityqueue.NewWithConfig(
+						workqueue.QueueConfig{
+							Name:  queueName,
+							Clock: clock,
+						},
+					),
+				},
+			),
+		}
+	} else {
+		rateLimitingQueueConfig = workqueue.RateLimitingQueueConfig{Name: queueName}
+	}
+	queue := workqueue.NewRateLimitingQueueWithConfig(
+		ratelimiterflag.DefaultControllerRateLimiter(options.RateLimiterOptions),
+		rateLimitingQueueConfig,
+	)
 	registry := frameworkplugins.NewInTreeRegistry()
 	if err := registry.Merge(options.outOfTreeRegistry); err != nil {
 		return nil, err
@@ -275,6 +313,7 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 	}
 	sched.enableEmptyWorkloadPropagation = options.enableEmptyWorkloadPropagation
 	sched.schedulerName = options.schedulerName
+	sched.enablePriorityQueue = options.enablePriorityQueue
 
 	sched.addAllEventHandlers()
 	return sched, nil
@@ -309,15 +348,20 @@ func (s *Scheduler) worker() {
 }
 
 func (s *Scheduler) scheduleNext() bool {
-	key, shutdown := s.queue.Get()
+	item, shutdown := s.queue.Get()
 	if shutdown {
 		klog.Errorf("Fail to pop item from queue")
 		return false
 	}
-	defer s.queue.Done(key)
+	defer s.queue.Done(item)
 
-	err := s.doSchedule(key.(string))
-	s.handleErr(err, key)
+	var err error
+	if s.enablePriorityQueue {
+		err = s.doSchedule(item.(priorityqueue.DataWithPriority).Key)
+	} else {
+		err = s.doSchedule(item.(string))
+	}
+	s.handleErr(err, item)
 	return true
 }
 
