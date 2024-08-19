@@ -38,6 +38,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
@@ -54,6 +55,7 @@ import (
 	frameworkplugins "github.com/karmada-io/karmada/pkg/scheduler/framework/plugins"
 	"github.com/karmada-io/karmada/pkg/scheduler/framework/runtime"
 	"github.com/karmada-io/karmada/pkg/scheduler/metrics"
+	"github.com/karmada-io/karmada/pkg/scheduler/priorityqueue"
 	"github.com/karmada-io/karmada/pkg/sharedcli/ratelimiterflag"
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/grpcconnection"
@@ -229,7 +231,27 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 	for _, opt := range opts {
 		opt(&options)
 	}
-	queue := workqueue.NewRateLimitingQueueWithConfig(ratelimiterflag.DefaultControllerRateLimiter(options.RateLimiterOptions), workqueue.RateLimitingQueueConfig{Name: "scheduler-queue"})
+	clock := clock.RealClock{}
+	queueName := "scheduler-queue"
+	queue := workqueue.NewRateLimitingQueueWithConfig(
+		ratelimiterflag.DefaultControllerRateLimiter(options.RateLimiterOptions),
+		workqueue.RateLimitingQueueConfig{
+			Name:  queueName,
+			Clock: clock,
+			DelayingQueue: workqueue.NewDelayingQueueWithConfig(
+				workqueue.DelayingQueueConfig{
+					Name:  queueName,
+					Clock: clock,
+					Queue: priorityqueue.NewWithConfig(
+						workqueue.QueueConfig{
+							Name:  queueName,
+							Clock: clock,
+						},
+					),
+				},
+			),
+		},
+	)
 	registry := frameworkplugins.NewInTreeRegistry()
 	if err := registry.Merge(options.outOfTreeRegistry); err != nil {
 		return nil, err
@@ -309,15 +331,15 @@ func (s *Scheduler) worker() {
 }
 
 func (s *Scheduler) scheduleNext() bool {
-	key, shutdown := s.queue.Get()
+	item, shutdown := s.queue.Get()
 	if shutdown {
 		klog.Errorf("Fail to pop item from queue")
 		return false
 	}
-	defer s.queue.Done(key)
+	defer s.queue.Done(item)
 
-	err := s.doSchedule(key.(string))
-	s.handleErr(err, key)
+	err := s.doSchedule(item.(priorityqueue.DataWithPriority).Key)
+	s.handleErr(err, item)
 	return true
 }
 
