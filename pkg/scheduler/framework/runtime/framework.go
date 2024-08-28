@@ -33,6 +33,7 @@ const (
 	filter                  = "Filter"
 	score                   = "Score"
 	scoreExtensionNormalize = "ScoreExtensionNormalize"
+	postFilter              = "PostFilter"
 )
 
 // frameworkImpl implements the Framework interface and is responsible for initializing and running scheduler
@@ -41,6 +42,7 @@ type frameworkImpl struct {
 	scorePluginsWeightMap map[string]int
 	filterPlugins         []framework.FilterPlugin
 	scorePlugins          []framework.ScorePlugin
+	postFilterPlugins     []framework.PostFilterPlugin
 
 	metricsRecorder *metricsRecorder
 }
@@ -72,8 +74,10 @@ func NewFramework(r Registry, opts ...Option) (framework.Framework, error) {
 	}
 	filterPluginsList := reflect.ValueOf(&f.filterPlugins).Elem()
 	scorePluginsList := reflect.ValueOf(&f.scorePlugins).Elem()
+	postFilterPluginsList := reflect.ValueOf(&f.postFilterPlugins).Elem()
 	filterType := filterPluginsList.Type().Elem()
 	scoreType := scorePluginsList.Type().Elem()
+	postFilterType := postFilterPluginsList.Type().Elem()
 
 	for name, factory := range r {
 		p, err := factory()
@@ -83,6 +87,7 @@ func NewFramework(r Registry, opts ...Option) (framework.Framework, error) {
 
 		addPluginToList(p, filterType, &filterPluginsList)
 		addPluginToList(p, scoreType, &scorePluginsList)
+		addPluginToList(p, postFilterType, &postFilterPluginsList)
 	}
 
 	return f, nil

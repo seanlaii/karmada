@@ -209,3 +209,9 @@ type ClusterScoreList []ClusterScore
 
 // PluginToClusterScores declares a map from plugin name to its ClusterScoreList.
 type PluginToClusterScores map[string]ClusterScoreList
+
+type PostFilterPlugin interface {
+	Plugin
+	// PostFilter is called by the scheduling framework.
+	PostFilter(ctx context.Context, bindingSpec *workv1alpha2.ResourceBindingSpec, bindingStatus *workv1alpha2.ResourceBindingStatus, cluster *clusterv1alpha1.Cluster) *Result
+}
