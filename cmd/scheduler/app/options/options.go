@@ -61,6 +61,8 @@ type Options struct {
 	// KubeAPIBurst is the burst to allow while talking with karmada-apiserver.
 	KubeAPIBurst int
 
+	// EnablePriorityQueue represents whether the priority queue should be enabled.
+	EnablePriorityQueue bool
 	// EnableSchedulerEstimator represents whether the accurate scheduler estimator should be enabled.
 	EnableSchedulerEstimator bool
 	// DisableSchedulerEstimatorInPullMode represents whether to disable the scheduler estimator in pull mode.
@@ -141,6 +143,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.SecurePort, "secure-port", defaultPort, "The secure port on which to serve HTTPS.")
 	fs.Float32Var(&o.KubeAPIQPS, "kube-api-qps", 40.0, "QPS to use while talking with karmada-apiserver.")
 	fs.IntVar(&o.KubeAPIBurst, "kube-api-burst", 60, "Burst to use while talking with karmada-apiserver.")
+	fs.BoolVar(&o.EnablePriorityQueue, "enable-priority-queue", false, "Enable using priority queue as scheduling queue.")
 	fs.BoolVar(&o.EnableSchedulerEstimator, "enable-scheduler-estimator", false, "Enable calling cluster scheduler estimator for adjusting replicas.")
 	fs.BoolVar(&o.DisableSchedulerEstimatorInPullMode, "disable-scheduler-estimator-in-pull-mode", false, "Disable the scheduler estimator for clusters in pull mode, which takes effect only when enable-scheduler-estimator is true.")
 	fs.DurationVar(&o.SchedulerEstimatorTimeout.Duration, "scheduler-estimator-timeout", 3*time.Second, "Specifies the timeout period of calling the scheduler estimator service.")
