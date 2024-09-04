@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -496,6 +497,72 @@ func Test_patchClusterBindingStatusWithAffinityName(t *testing.T) {
 			}
 			if !reflect.DeepEqual(res.Status, test.expected.Status) {
 				t.Errorf("expected status: %v, but got: %v", test.expected.Status, res.Status)
+			}
+		})
+	}
+}
+
+func Test_issuePreemption(t *testing.T) {
+	dynamicClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	karmadaClient := karmadafake.NewSimpleClientset()
+	kubeClient := fake.NewSimpleClientset()
+
+	tests := []struct {
+		name     string
+		bindings []workv1alpha2.ResourceBinding
+	}{
+		{
+			name: "issue preemption success",
+			bindings: []workv1alpha2.ResourceBinding{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "rb-1", Namespace: "default", Generation: 1},
+					Spec:       workv1alpha2.ResourceBindingSpec{},
+					Status:     workv1alpha2.ResourceBindingStatus{},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "rb-2", Namespace: "default", Generation: 1},
+					Spec:       workv1alpha2.ResourceBindingSpec{},
+					Status:     workv1alpha2.ResourceBindingStatus{},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sche, err := NewScheduler(dynamicClient, karmadaClient, kubeClient)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, binding := range test.bindings {
+				_, err := karmadaClient.WorkV1alpha2().ResourceBindings(binding.Namespace).Create(context.TODO(), &binding, metav1.CreateOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = sche.issuePreemption(
+				[]*workv1alpha2.ObjectReference{
+					{
+						Name:      "rb-1",
+						Namespace: "default",
+						Kind:      "ResourceBinding",
+					},
+					{
+						Name:      "rb-2",
+						Namespace: "default",
+						Kind:      "ResourceBinding",
+					},
+				},
+				"ResourceBinding",
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, binding := range test.bindings {
+				_, err := karmadaClient.WorkV1alpha2().ResourceBindings(binding.Namespace).Get(context.TODO(), binding.Name, metav1.GetOptions{})
+				if err != nil && !errors.IsNotFound(err) {
+					t.Fatal(err)
+				}
 			}
 		})
 	}

@@ -60,6 +60,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/grpcconnection"
 	"github.com/karmada-io/karmada/pkg/util/helper"
+	"github.com/karmada-io/karmada/pkg/util/lifted/scheduler/framework/parallelize"
 	utilmetrics "github.com/karmada-io/karmada/pkg/util/metrics"
 )
 
@@ -93,6 +94,7 @@ type Scheduler struct {
 	clusterBindingLister worklister.ClusterResourceBindingLister
 	clusterLister        clusterlister.ClusterLister
 	informerFactory      informerfactory.SharedInformerFactory
+	parallelizer         parallelize.Parallelizer
 
 	// clusterReconcileWorker reconciles cluster changes to trigger corresponding
 	// ResourceBinding/ClusterResourceBinding rescheduling.
@@ -105,6 +107,7 @@ type Scheduler struct {
 
 	eventRecorder record.EventRecorder
 
+	enablePriorityQueue                 bool
 	enableSchedulerEstimator            bool
 	disableSchedulerEstimatorInPullMode bool
 	schedulerEstimatorCache             *estimatorclient.SchedulerEstimatorCache
@@ -117,6 +120,8 @@ type Scheduler struct {
 }
 
 type schedulerOptions struct {
+	// enablePriorityQueue represents whether the priority queue should be enabled.
+	enablePriorityQueue bool
 	// enableSchedulerEstimator represents whether the accurate scheduler estimator should be enabled.
 	enableSchedulerEstimator bool
 	// disableSchedulerEstimatorInPullMode represents whether to disable the scheduler estimator in pull mode.
@@ -137,10 +142,26 @@ type schedulerOptions struct {
 	RateLimiterOptions ratelimiterflag.Options
 	// schedulerEstimatorClientConfig contains the configuration of GRPC.
 	schedulerEstimatorClientConfig *grpcconnection.ClientConfig
+	// Parallelism defines the amount of parallelism in algorithms for preemption. Must be greater than 0. Defaults to 16.
+	parallelism int
 }
 
 // Option configures a Scheduler
 type Option func(*schedulerOptions)
+
+// WithEnablePriorityQueue sets the enablePriorityQueue for scheduler
+func WithEnablePriorityQueue(enablePriorityQueue bool) Option {
+	return func(o *schedulerOptions) {
+		o.enablePriorityQueue = enablePriorityQueue
+	}
+}
+
+// WithEnableSchedulerEstimator sets the enableSchedulerEstimator for scheduler
+func WithParallelism(parallelism int) Option {
+	return func(o *schedulerOptions) {
+		o.parallelism = parallelism
+	}
+}
 
 // WithEnableSchedulerEstimator sets the enableSchedulerEstimator for scheduler
 func WithEnableSchedulerEstimator(enableSchedulerEstimator bool) Option {
@@ -233,9 +254,9 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 	}
 	clock := clock.RealClock{}
 	queueName := "scheduler-queue"
-	queue := workqueue.NewRateLimitingQueueWithConfig(
-		ratelimiterflag.DefaultControllerRateLimiter(options.RateLimiterOptions),
-		workqueue.RateLimitingQueueConfig{
+	var rateLimitingQueueConfig workqueue.RateLimitingQueueConfig
+	if options.enablePriorityQueue {
+		rateLimitingQueueConfig = workqueue.RateLimitingQueueConfig{
 			Name:  queueName,
 			Clock: clock,
 			DelayingQueue: workqueue.NewDelayingQueueWithConfig(
@@ -250,7 +271,13 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 					),
 				},
 			),
-		},
+		}
+	} else {
+		rateLimitingQueueConfig = workqueue.RateLimitingQueueConfig{Name: queueName}
+	}
+	queue := workqueue.NewRateLimitingQueueWithConfig(
+		ratelimiterflag.DefaultControllerRateLimiter(options.RateLimiterOptions),
+		rateLimitingQueueConfig,
 	)
 	registry := frameworkplugins.NewInTreeRegistry()
 	if err := registry.Merge(options.outOfTreeRegistry); err != nil {
@@ -273,6 +300,7 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 		queue:                queue,
 		Algorithm:            algorithm,
 		schedulerCache:       schedulerCache,
+		parallelizer:         parallelize.NewParallelizer(options.parallelism),
 	}
 
 	sched.clusterReconcileWorker = util.NewAsyncWorker(util.Options{
@@ -297,6 +325,7 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 	}
 	sched.enableEmptyWorkloadPropagation = options.enableEmptyWorkloadPropagation
 	sched.schedulerName = options.schedulerName
+	sched.enablePriorityQueue = options.enablePriorityQueue
 
 	sched.addAllEventHandlers()
 	return sched, nil
@@ -338,7 +367,12 @@ func (s *Scheduler) scheduleNext() bool {
 	}
 	defer s.queue.Done(item)
 
-	err := s.doSchedule(item.(priorityqueue.DataWithPriority).Key)
+	var err error
+	if s.enablePriorityQueue {
+		err = s.doSchedule(item.(priorityqueue.DataWithPriority).Key)
+	} else {
+		err = s.doSchedule(item.(string))
+	}
 	s.handleErr(err, item)
 	return true
 }
@@ -527,6 +561,21 @@ func (s *Scheduler) scheduleResourceBindingWithClusterAffinity(rb *workv1alpha2.
 	var fitErr *framework.FitError
 	// in case of no cluster error, can not return but continue to patch(cleanup) the result.
 	if err != nil && !errors.As(err, &fitErr) {
+		if s.Algorithm.HasPostFilterPlugins() {
+			klog.V(4).Info("There are registered PostFilter plugins, so perform preemption")
+			preemptionTargets, preemptionErr := s.Algorithm.FindPreemptionTargets(context.TODO(), &rb.Spec, scheduleResult.FeasibleClusters)
+			if preemptionErr != nil {
+				klog.Errorf("Failed finding preemption targets forResourceBinding(%s/%s): %v", rb.Namespace, rb.Name, err)
+				err = utilerrors.NewAggregate([]error{err, preemptionErr})
+			}
+			if len(preemptionTargets.TargetBindings) > 0 {
+				preemptionErr := s.issuePreemption(preemptionTargets.TargetBindings, "ResourceBinding")
+				if preemptionErr != nil {
+					err = utilerrors.NewAggregate([]error{err, preemptionErr})
+				}
+			}
+		}
+
 		s.recordScheduleResultEventForResourceBinding(rb, nil, err)
 		klog.Errorf("Failed scheduling ResourceBinding(%s/%s): %v", rb.Namespace, rb.Name, err)
 		return err
@@ -974,4 +1023,61 @@ func targetClustersToString(tcs []workv1alpha2.TargetCluster) string {
 		tcsStrs = append(tcsStrs, fmt.Sprintf("%s:%d", cluster.Name, cluster.Replicas))
 	}
 	return strings.Join(tcsStrs, ", ")
+}
+
+func (s *Scheduler) issuePreemption(preemptionTargets []*workv1alpha2.ObjectReference, bindingType string) error {
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	errCh := parallelize.NewErrorChannel()
+	if bindingType == "ResourceBinding" {
+		preemptBindings := func(index int) {
+			target := preemptionTargets[index]
+			resourceBinding, err := s.KarmadaClient.WorkV1alpha2().ResourceBindings(target.Namespace).Get(context.TODO(), target.Name, metav1.GetOptions{})
+			if err != nil {
+				errCh.SendErrorWithCancel(err, cancel)
+				return
+			}
+
+			err = s.KarmadaClient.WorkV1alpha2().ResourceBindings(target.Namespace).Delete(context.TODO(), target.Name, metav1.DeleteOptions{})
+			if err != nil {
+				errCh.SendErrorWithCancel(err, cancel)
+				return
+			}
+
+			newResourceBinding := resourceBinding.DeepCopy()
+			newResourceBinding.Spec.Clusters = nil
+			s.queue.AddAfter(newResourceBinding, time.Duration(10)*time.Millisecond)
+		}
+
+		s.parallelizer.Until(ctx, len(preemptionTargets), preemptBindings)
+		if err := errCh.ReceiveError(); err != nil {
+			return err
+		}
+	} else if bindingType == "ClusterResourceBinding" {
+		preemptBindings := func(index int) {
+			target := preemptionTargets[index]
+			clusterResourceBinding, err := s.KarmadaClient.WorkV1alpha2().ClusterResourceBindings().Get(context.TODO(), target.Name, metav1.GetOptions{})
+			if err != nil {
+				errCh.SendErrorWithCancel(err, cancel)
+				return
+			}
+
+			err = s.KarmadaClient.WorkV1alpha2().ClusterResourceBindings().Delete(context.TODO(), target.Name, metav1.DeleteOptions{})
+			if err != nil {
+				errCh.SendErrorWithCancel(err, cancel)
+				return
+			}
+
+			newClusterResourceBinding := clusterResourceBinding.DeepCopy()
+			newClusterResourceBinding.Spec.Clusters = nil
+			s.queue.AddAfter(newClusterResourceBinding, time.Duration(10)*time.Millisecond)
+		}
+
+		s.parallelizer.Until(ctx, len(preemptionTargets), preemptBindings)
+		if err := errCh.ReceiveError(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

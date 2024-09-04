@@ -50,6 +50,11 @@ type Framework interface {
 
 	// RunScorePlugins runs the set of configured Score plugins, it returns a map of plugin name to cores
 	RunScorePlugins(ctx context.Context, spec *workv1alpha2.ResourceBindingSpec, clusters []*clusterv1alpha1.Cluster) (PluginToClusterScores, *Result)
+
+	// RunPostFilterPlugins runs the set of configured PostFilter plugins, it returns a map of plugin name to cores
+	RunPostFilterPlugins(ctx context.Context, bindingSpec *workv1alpha2.ResourceBindingSpec, clusters []*clusterv1alpha1.Cluster) (*PreemptionTargets, *Result)
+
+	HasPostFilterPlugins() bool
 }
 
 // Plugin is the parent type for all the scheduling framework plugins.
@@ -213,5 +218,9 @@ type PluginToClusterScores map[string]ClusterScoreList
 type PostFilterPlugin interface {
 	Plugin
 	// PostFilter is called by the scheduling framework.
-	PostFilter(ctx context.Context, bindingSpec *workv1alpha2.ResourceBindingSpec, bindingStatus *workv1alpha2.ResourceBindingStatus, cluster *clusterv1alpha1.Cluster) *Result
+	PostFilter(ctx context.Context, bindingSpec *workv1alpha2.ResourceBindingSpec, clusters []*clusterv1alpha1.Cluster) (*PreemptionTargets, *Result)
+}
+
+type PreemptionTargets struct {
+	TargetBindings []*workv1alpha2.ObjectReference
 }

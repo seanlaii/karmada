@@ -61,6 +61,8 @@ type Options struct {
 	// KubeAPIBurst is the burst to allow while talking with karmada-apiserver.
 	KubeAPIBurst int
 
+	// EnablePriorityQueue represents whether the priority queue should be enabled.
+	EnablePriorityQueue bool
 	// EnableSchedulerEstimator represents whether the accurate scheduler estimator should be enabled.
 	EnableSchedulerEstimator bool
 	// DisableSchedulerEstimatorInPullMode represents whether to disable the scheduler estimator in pull mode.
@@ -96,6 +98,9 @@ type Options struct {
 
 	// RateLimiterOpts contains the options for rate limiter.
 	RateLimiterOpts ratelimiterflag.Options
+
+	// Parallelism defines the amount of parallelism in algorithms for preemption. Must be greater than 0. Defaults to 16.
+	Parallelism int
 }
 
 // NewOptions builds an default scheduler options.
@@ -141,6 +146,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.SecurePort, "secure-port", defaultPort, "The secure port on which to serve HTTPS.")
 	fs.Float32Var(&o.KubeAPIQPS, "kube-api-qps", 40.0, "QPS to use while talking with karmada-apiserver.")
 	fs.IntVar(&o.KubeAPIBurst, "kube-api-burst", 60, "Burst to use while talking with karmada-apiserver.")
+	fs.BoolVar(&o.EnablePriorityQueue, "enable-priority-queue", false, "Enable using priority queue as scheduling queue.")
 	fs.BoolVar(&o.EnableSchedulerEstimator, "enable-scheduler-estimator", false, "Enable calling cluster scheduler estimator for adjusting replicas.")
 	fs.BoolVar(&o.DisableSchedulerEstimatorInPullMode, "disable-scheduler-estimator-in-pull-mode", false, "Disable the scheduler estimator for clusters in pull mode, which takes effect only when enable-scheduler-estimator is true.")
 	fs.DurationVar(&o.SchedulerEstimatorTimeout.Duration, "scheduler-estimator-timeout", 3*time.Second, "Specifies the timeout period of calling the scheduler estimator service.")
@@ -154,6 +160,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringSliceVar(&o.Plugins, "plugins", []string{"*"},
 		fmt.Sprintf("A list of plugins to enable. '*' enables all build-in and customized plugins, 'foo' enables the plugin named 'foo', '*,-foo' disables the plugin named 'foo'.\nAll build-in plugins: %s.", strings.Join(frameworkplugins.NewInTreeRegistry().FactoryNames(), ",")))
 	fs.StringVar(&o.SchedulerName, "scheduler-name", scheduler.DefaultScheduler, "SchedulerName represents the name of the scheduler. default is 'default-scheduler'.")
+	fs.IntVar(&o.Parallelism, "parallelism", o.Parallelism, "Parallelism defines the amount of parallelism in algorithms for preemption. Must be greater than 0. Defaults to 16.")
 	features.FeatureGate.AddFlag(fs)
 	o.ProfileOpts.AddFlags(fs)
 	o.RateLimiterOpts.AddFlags(fs)

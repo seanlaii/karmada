@@ -194,3 +194,36 @@ func addPluginToList(plugin framework.Plugin, pluginType reflect.Type, pluginLis
 		pluginList.Set(newPlugins)
 	}
 }
+
+func (frw *frameworkImpl) HasPostFilterPlugins() bool {
+	return len(frw.postFilterPlugins) > 0
+}
+
+// If any of the result is not success, the cluster is not suited for the resource.
+func (frw *frameworkImpl) RunPostFilterPlugins(
+	ctx context.Context,
+	bindingSpec *workv1alpha2.ResourceBindingSpec,
+	clusters []*clusterv1alpha1.Cluster,
+) (preemptionTargets *framework.PreemptionTargets, result *framework.Result) {
+	startTime := time.Now()
+	defer func() {
+		metrics.FrameworkExtensionPointDuration.WithLabelValues(postFilter, result.Code().String()).Observe(utilmetrics.DurationInSeconds(startTime))
+	}()
+	for _, p := range frw.postFilterPlugins {
+		candidates, result := frw.runPostFilterPlugin(ctx, p, bindingSpec, clusters)
+		if !result.IsSuccess() {
+			return nil, framework.AsResult(fmt.Errorf("failed to run plugin %q: %w", p.Name(), result.AsError()))
+		}
+		if len(candidates.TargetBindings) < len(preemptionTargets.TargetBindings) {
+			preemptionTargets = candidates
+		}
+	}
+	return preemptionTargets, framework.NewResult(framework.Success)
+}
+
+func (frw *frameworkImpl) runPostFilterPlugin(ctx context.Context, pl framework.PostFilterPlugin, spec *workv1alpha2.ResourceBindingSpec, clusters []*clusterv1alpha1.Cluster) (*framework.PreemptionTargets, *framework.Result) {
+	startTime := time.Now()
+	preemptionTargets, result := pl.PostFilter(ctx, spec, clusters)
+	frw.metricsRecorder.observePluginDurationAsync(score, pl.Name(), result, utilmetrics.DurationInSeconds(startTime))
+	return preemptionTargets, result
+}
