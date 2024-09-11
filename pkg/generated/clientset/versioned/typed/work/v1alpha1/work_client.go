@@ -29,6 +29,7 @@ import (
 type WorkV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	ClusterResourceBindingsGetter
+	FederatedPriorityClassesGetter
 	ResourceBindingsGetter
 	WorksGetter
 }
@@ -40,6 +41,10 @@ type WorkV1alpha1Client struct {
 
 func (c *WorkV1alpha1Client) ClusterResourceBindings() ClusterResourceBindingInterface {
 	return newClusterResourceBindings(c)
+}
+
+func (c *WorkV1alpha1Client) FederatedPriorityClasses() FederatedPriorityClassInterface {
+	return newFederatedPriorityClasses(c)
 }
 
 func (c *WorkV1alpha1Client) ResourceBindings(namespace string) ResourceBindingInterface {

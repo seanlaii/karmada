@@ -32,6 +32,7 @@ import (
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
+	"github.com/karmada-io/karmada/pkg/apis/work/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/pkg/scheduler/metrics"
 	"github.com/karmada-io/karmada/pkg/scheduler/priorityqueue"
@@ -120,9 +121,17 @@ func (s *Scheduler) onResourceBindingAdd(obj interface{}) {
 		return
 	}
 	if s.enablePriorityQueue {
+		federatedPriorityClass, err := s.getFederatedPriorityClassFromObject(obj)
+		var priority int32
+		if err != nil {
+			klog.Errorf(err.Error())
+			priority = 10
+		} else {
+			priority = federatedPriorityClass.Value
+		}
 		s.queue.Add(priorityqueue.DataWithPriority{
 			Key:      key,
-			Priority: 1,
+			Priority: int(priority),
 		})
 	} else {
 		s.queue.Add(key)
@@ -155,9 +164,14 @@ func (s *Scheduler) onResourceBindingUpdate(old, cur interface{}) {
 	}
 
 	if s.enablePriorityQueue {
+		federatedPriorityClass, err := s.getFederatedPriorityClassFromObject(cur)
+		if err != nil {
+			klog.Errorf(err.Error())
+			return
+		}
 		s.queue.Add(priorityqueue.DataWithPriority{
 			Key:      key,
-			Priority: 1,
+			Priority: int(federatedPriorityClass.Value),
 		})
 	} else {
 		s.queue.Add(key)
@@ -173,9 +187,14 @@ func (s *Scheduler) onResourceBindingRequeue(binding *workv1alpha2.ResourceBindi
 	}
 	klog.Infof("Requeue ResourceBinding(%s/%s) due to event(%s).", binding.Namespace, binding.Name, event)
 	if s.enablePriorityQueue {
+		federatedPriorityClass, err := s.federatedPriorityClassLister.Get(binding.Spec.ReplicaRequirements.PriorityClassName)
+		if err != nil {
+			klog.Errorf("couldn't get priority class for object %#v: %v", binding, err)
+			return
+		}
 		s.queue.Add(priorityqueue.DataWithPriority{
 			Key:      key,
-			Priority: 1,
+			Priority: int(federatedPriorityClass.Value),
 		})
 	} else {
 		s.queue.Add(key)
@@ -191,9 +210,14 @@ func (s *Scheduler) onClusterResourceBindingRequeue(clusterResourceBinding *work
 	}
 	klog.Infof("Requeue ClusterResourceBinding(%s) due to event(%s).", clusterResourceBinding.Name, event)
 	if s.enablePriorityQueue {
+		federatedPriorityClass, err := s.federatedPriorityClassLister.Get(clusterResourceBinding.Spec.ReplicaRequirements.PriorityClassName)
+		if err != nil {
+			klog.Errorf("couldn't get priority class for object %#v: %v", clusterResourceBinding, err)
+			return
+		}
 		s.queue.Add(priorityqueue.DataWithPriority{
 			Key:      key,
-			Priority: 1,
+			Priority: int(federatedPriorityClass.Value),
 		})
 	} else {
 		s.queue.Add(key)
@@ -372,4 +396,40 @@ func (s *Scheduler) enqueueAffectedCRBs(cluster *clusterv1alpha1.Cluster) error 
 	}
 
 	return nil
+}
+
+func (s *Scheduler) getFederatedPriorityClassFromObject(obj interface{}) (*v1alpha1.FederatedPriorityClass, error) {
+	var priorityClassName string
+	klog.Infof("object type: %T\n", obj)
+
+	switch typedObj := obj.(type) {
+	case *workv1alpha2.ResourceBinding:
+		if typedObj == nil {
+			return nil, fmt.Errorf("cannot convert to *workv1alpha2.ResourceBinding for object %#v", obj)
+		}
+		if typedObj.Spec.ReplicaRequirements != nil {
+			priorityClassName = typedObj.Spec.ReplicaRequirements.PriorityClassName
+		}
+	case *workv1alpha2.ClusterResourceBinding:
+		if typedObj == nil {
+			return nil, fmt.Errorf("cannot convert to *workv1alpha2.ClusterResourceBinding for object %#v", obj)
+		}
+		if typedObj.Spec.ReplicaRequirements != nil {
+			priorityClassName = typedObj.Spec.ReplicaRequirements.PriorityClassName
+		}
+	default:
+		return nil, fmt.Errorf("unsupported object type: %T", obj)
+	}
+
+	klog.Infoln("priorityClassName: ", priorityClassName)
+	if priorityClassName != "test-priority-class" {
+		priorityClassName = "test-priority-class"
+	}
+
+	federatedPriorityClass, err := s.federatedPriorityClassLister.Get(priorityClassName)
+	if err != nil {
+		err = fmt.Errorf("couldn't get priority class for object %#v: %v", obj, err)
+		return nil, err
+	}
+	return federatedPriorityClass, nil
 }

@@ -48,6 +48,7 @@ import (
 	karmadaclientset "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
 	informerfactory "github.com/karmada-io/karmada/pkg/generated/informers/externalversions"
 	clusterlister "github.com/karmada-io/karmada/pkg/generated/listers/cluster/v1alpha1"
+	federatedlister "github.com/karmada-io/karmada/pkg/generated/listers/work/v1alpha1"
 	worklister "github.com/karmada-io/karmada/pkg/generated/listers/work/v1alpha2"
 	schedulercache "github.com/karmada-io/karmada/pkg/scheduler/cache"
 	"github.com/karmada-io/karmada/pkg/scheduler/core"
@@ -87,14 +88,15 @@ const (
 
 // Scheduler is the scheduler schema, which is used to schedule a specific resource to specific clusters
 type Scheduler struct {
-	DynamicClient        dynamic.Interface
-	KarmadaClient        karmadaclientset.Interface
-	KubeClient           kubernetes.Interface
-	bindingLister        worklister.ResourceBindingLister
-	clusterBindingLister worklister.ClusterResourceBindingLister
-	clusterLister        clusterlister.ClusterLister
-	informerFactory      informerfactory.SharedInformerFactory
-	parallelizer         parallelize.Parallelizer
+	DynamicClient                dynamic.Interface
+	KarmadaClient                karmadaclientset.Interface
+	KubeClient                   kubernetes.Interface
+	bindingLister                worklister.ResourceBindingLister
+	federatedPriorityClassLister federatedlister.FederatedPriorityClassLister
+	clusterBindingLister         worklister.ClusterResourceBindingLister
+	clusterLister                clusterlister.ClusterLister
+	informerFactory              informerfactory.SharedInformerFactory
+	parallelizer                 parallelize.Parallelizer
 
 	// clusterReconcileWorker reconciles cluster changes to trigger corresponding
 	// ResourceBinding/ClusterResourceBinding rescheduling.
@@ -254,6 +256,7 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 	}
 	clock := clock.RealClock{}
 	queueName := "scheduler-queue"
+	var federatedPriorityClassLister federatedlister.FederatedPriorityClassLister
 	var rateLimitingQueueConfig workqueue.RateLimitingQueueConfig
 	if options.enablePriorityQueue {
 		rateLimitingQueueConfig = workqueue.RateLimitingQueueConfig{
@@ -272,6 +275,7 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 				},
 			),
 		}
+		federatedPriorityClassLister = factory.Work().V1alpha1().FederatedPriorityClasses().Lister()
 	} else {
 		rateLimitingQueueConfig = workqueue.RateLimitingQueueConfig{Name: queueName}
 	}
@@ -290,17 +294,18 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 	}
 
 	sched := &Scheduler{
-		DynamicClient:        dynamicClient,
-		KarmadaClient:        karmadaClient,
-		KubeClient:           kubeClient,
-		bindingLister:        bindingLister,
-		clusterBindingLister: clusterBindingLister,
-		clusterLister:        clusterLister,
-		informerFactory:      factory,
-		queue:                queue,
-		Algorithm:            algorithm,
-		schedulerCache:       schedulerCache,
-		parallelizer:         parallelize.NewParallelizer(options.parallelism),
+		DynamicClient:                dynamicClient,
+		KarmadaClient:                karmadaClient,
+		KubeClient:                   kubeClient,
+		bindingLister:                bindingLister,
+		clusterBindingLister:         clusterBindingLister,
+		clusterLister:                clusterLister,
+		informerFactory:              factory,
+		queue:                        queue,
+		Algorithm:                    algorithm,
+		schedulerCache:               schedulerCache,
+		parallelizer:                 parallelize.NewParallelizer(options.parallelism),
+		federatedPriorityClassLister: federatedPriorityClassLister,
 	}
 
 	sched.clusterReconcileWorker = util.NewAsyncWorker(util.Options{
@@ -569,7 +574,7 @@ func (s *Scheduler) scheduleResourceBindingWithClusterAffinity(rb *workv1alpha2.
 				err = utilerrors.NewAggregate([]error{err, preemptionErr})
 			}
 			if len(preemptionTargets.TargetBindings) > 0 {
-				preemptionErr := s.issuePreemption(preemptionTargets.TargetBindings, "ResourceBinding")
+				preemptionErr := s.issuePreemption(preemptionTargets.TargetBindings)
 				if preemptionErr != nil {
 					err = utilerrors.NewAggregate([]error{err, preemptionErr})
 				}
@@ -1025,59 +1030,63 @@ func targetClustersToString(tcs []workv1alpha2.TargetCluster) string {
 	return strings.Join(tcsStrs, ", ")
 }
 
-func (s *Scheduler) issuePreemption(preemptionTargets []*workv1alpha2.ObjectReference, bindingType string) error {
+func (s *Scheduler) issuePreemption(preemptionTargets []*workv1alpha2.ObjectReference) error {
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	errCh := parallelize.NewErrorChannel()
-	if bindingType == "ResourceBinding" {
-		preemptBindings := func(index int) {
-			target := preemptionTargets[index]
-			resourceBinding, err := s.KarmadaClient.WorkV1alpha2().ResourceBindings(target.Namespace).Get(context.TODO(), target.Name, metav1.GetOptions{})
+
+	preemptBindings := func(index int) {
+		target := preemptionTargets[index]
+
+		switch target.Kind {
+		case "ResourceBinding":
+			resourceBinding, err := s.KarmadaClient.WorkV1alpha2().ResourceBindings(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
 			if err != nil {
 				errCh.SendErrorWithCancel(err, cancel)
 				return
 			}
+			if err := s.KarmadaClient.WorkV1alpha2().ResourceBindings(target.Namespace).Delete(ctx, target.Name, metav1.DeleteOptions{}); err != nil {
+				errCh.SendErrorWithCancel(err, cancel)
+				return
+			}
+			ref := &corev1.ObjectReference{
+				Kind:       resourceBinding.Spec.Resource.Kind,
+				APIVersion: resourceBinding.Spec.Resource.APIVersion,
+				Namespace:  resourceBinding.Spec.Resource.Namespace,
+				Name:       resourceBinding.Spec.Resource.Name,
+				UID:        resourceBinding.Spec.Resource.UID,
+			}
 
-			err = s.KarmadaClient.WorkV1alpha2().ResourceBindings(target.Namespace).Delete(context.TODO(), target.Name, metav1.DeleteOptions{})
+			s.eventRecorder.Event(resourceBinding, corev1.EventTypeWarning, "Preempted", fmt.Sprintf("Preempted by resourceBinding %v", resourceBinding))
+			s.eventRecorder.Event(ref, corev1.EventTypeWarning, "Preempted", fmt.Sprintf("Preempted by object %v", ref))
+
+		case "ClusterResourceBinding":
+			clusterResourceBinding, err := s.KarmadaClient.WorkV1alpha2().ClusterResourceBindings().Get(ctx, target.Name, metav1.GetOptions{})
 			if err != nil {
 				errCh.SendErrorWithCancel(err, cancel)
 				return
 			}
-
-			newResourceBinding := resourceBinding.DeepCopy()
-			newResourceBinding.Spec.Clusters = nil
-			s.queue.AddAfter(newResourceBinding, time.Duration(10)*time.Millisecond)
-		}
-
-		s.parallelizer.Until(ctx, len(preemptionTargets), preemptBindings)
-		if err := errCh.ReceiveError(); err != nil {
-			return err
-		}
-	} else if bindingType == "ClusterResourceBinding" {
-		preemptBindings := func(index int) {
-			target := preemptionTargets[index]
-			clusterResourceBinding, err := s.KarmadaClient.WorkV1alpha2().ClusterResourceBindings().Get(context.TODO(), target.Name, metav1.GetOptions{})
-			if err != nil {
+			if err := s.KarmadaClient.WorkV1alpha2().ClusterResourceBindings().Delete(ctx, target.Name, metav1.DeleteOptions{}); err != nil {
 				errCh.SendErrorWithCancel(err, cancel)
 				return
 			}
-
-			err = s.KarmadaClient.WorkV1alpha2().ClusterResourceBindings().Delete(context.TODO(), target.Name, metav1.DeleteOptions{})
-			if err != nil {
-				errCh.SendErrorWithCancel(err, cancel)
-				return
+			ref := &corev1.ObjectReference{
+				Kind:       clusterResourceBinding.Spec.Resource.Kind,
+				APIVersion: clusterResourceBinding.Spec.Resource.APIVersion,
+				Namespace:  clusterResourceBinding.Spec.Resource.Namespace,
+				Name:       clusterResourceBinding.Spec.Resource.Name,
+				UID:        clusterResourceBinding.Spec.Resource.UID,
 			}
 
-			newClusterResourceBinding := clusterResourceBinding.DeepCopy()
-			newClusterResourceBinding.Spec.Clusters = nil
-			s.queue.AddAfter(newClusterResourceBinding, time.Duration(10)*time.Millisecond)
-		}
+			s.eventRecorder.Event(clusterResourceBinding, corev1.EventTypeWarning, "Preempted", fmt.Sprintf("Preempted by clusterResourceBinding %v", clusterResourceBinding))
+			s.eventRecorder.Event(ref, corev1.EventTypeWarning, "Preempted", fmt.Sprintf("Preempted by object %v", ref))
 
-		s.parallelizer.Until(ctx, len(preemptionTargets), preemptBindings)
-		if err := errCh.ReceiveError(); err != nil {
-			return err
+		default:
+			errCh.SendErrorWithCancel(fmt.Errorf("unsupported binding kind: %s", target.Kind), cancel)
+			return
 		}
 	}
 
-	return nil
+	s.parallelizer.Until(ctx, len(preemptionTargets), preemptBindings)
+	return errCh.ReceiveError()
 }

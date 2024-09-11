@@ -20,6 +20,8 @@ package v1alpha1
 
 type ClusterResourceBindingExpansion interface{}
 
+type FederatedPriorityClassExpansion interface{}
+
 type ResourceBindingExpansion interface{}
 
 type WorkExpansion interface{}

@@ -26,6 +26,8 @@ import (
 type Interface interface {
 	// ClusterResourceBindings returns a ClusterResourceBindingInformer.
 	ClusterResourceBindings() ClusterResourceBindingInformer
+	// FederatedPriorityClasses returns a FederatedPriorityClassInformer.
+	FederatedPriorityClasses() FederatedPriorityClassInformer
 	// ResourceBindings returns a ResourceBindingInformer.
 	ResourceBindings() ResourceBindingInformer
 	// Works returns a WorkInformer.
@@ -46,6 +48,11 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 // ClusterResourceBindings returns a ClusterResourceBindingInformer.
 func (v *version) ClusterResourceBindings() ClusterResourceBindingInformer {
 	return &clusterResourceBindingInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// FederatedPriorityClasses returns a FederatedPriorityClassInformer.
+func (v *version) FederatedPriorityClasses() FederatedPriorityClassInformer {
+	return &federatedPriorityClassInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
 // ResourceBindings returns a ResourceBindingInformer.

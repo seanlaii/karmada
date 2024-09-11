@@ -67,6 +67,16 @@ func TestCreateScheduler(t *testing.T) {
 			},
 			enableSchedulerEstimator: false,
 		},
+		{
+			name: "scheduler with priority queue enabled",
+			opts: []Option{
+				WithEnableSchedulerEstimator(true),
+				WithEnablePriorityQueue(true),
+				WithSchedulerEstimatorConnection(port, "", "", "", false),
+			},
+			enableSchedulerEstimator: true,
+			schedulerEstimatorPort:   port,
+		},
 	}
 
 	for _, tc := range testcases {
@@ -553,7 +563,6 @@ func Test_issuePreemption(t *testing.T) {
 						Kind:      "ResourceBinding",
 					},
 				},
-				"ResourceBinding",
 			)
 			if err != nil {
 				t.Fatal(err)

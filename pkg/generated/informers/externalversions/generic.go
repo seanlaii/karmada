@@ -110,6 +110,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		// Group=work.karmada.io, Version=v1alpha1
 	case workv1alpha1.SchemeGroupVersion.WithResource("clusterresourcebindings"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Work().V1alpha1().ClusterResourceBindings().Informer()}, nil
+	case workv1alpha1.SchemeGroupVersion.WithResource("federatedpriorityclasses"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Work().V1alpha1().FederatedPriorityClasses().Informer()}, nil
 	case workv1alpha1.SchemeGroupVersion.WithResource("resourcebindings"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Work().V1alpha1().ResourceBindings().Informer()}, nil
 	case workv1alpha1.SchemeGroupVersion.WithResource("works"):
