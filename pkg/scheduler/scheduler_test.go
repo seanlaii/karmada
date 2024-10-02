@@ -551,7 +551,12 @@ func Test_issuePreemption(t *testing.T) {
 				}
 			}
 			err = sche.issuePreemption(
-				[]*workv1alpha2.ObjectReference{
+				workv1alpha2.ObjectReference{
+					Name:      "preemptor-rb",
+					Namespace: "default",
+					Kind:      "ResourceBinding",
+				},
+				[]workv1alpha2.ObjectReference{
 					{
 						Name:      "rb-1",
 						Namespace: "default",

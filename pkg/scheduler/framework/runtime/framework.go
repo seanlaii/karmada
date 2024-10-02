@@ -27,6 +27,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/scheduler/framework"
 	"github.com/karmada-io/karmada/pkg/scheduler/metrics"
 	utilmetrics "github.com/karmada-io/karmada/pkg/util/metrics"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -209,12 +210,20 @@ func (frw *frameworkImpl) RunPostFilterPlugins(
 	defer func() {
 		metrics.FrameworkExtensionPointDuration.WithLabelValues(postFilter, result.Code().String()).Observe(utilmetrics.DurationInSeconds(startTime))
 	}()
+	preemptionTargets = &framework.PreemptionTargets{
+		TargetBindings: []workv1alpha2.ObjectReference{},
+	}
 	for _, p := range frw.postFilterPlugins {
 		candidates, result := frw.runPostFilterPlugin(ctx, p, bindingSpec, clusters)
 		if !result.IsSuccess() {
 			return nil, framework.AsResult(fmt.Errorf("failed to run plugin %q: %w", p.Name(), result.AsError()))
 		}
-		if len(candidates.TargetBindings) < len(preemptionTargets.TargetBindings) {
+		if candidates == nil {
+			klog.Infof("candidates is nill")
+			continue
+		}
+		klog.Infof("candidates: %v", candidates)
+		if len(preemptionTargets.TargetBindings) == 0 || len(candidates.TargetBindings) < len(preemptionTargets.TargetBindings) {
 			preemptionTargets = candidates
 		}
 	}

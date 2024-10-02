@@ -222,5 +222,5 @@ type PostFilterPlugin interface {
 }
 
 type PreemptionTargets struct {
-	TargetBindings []*workv1alpha2.ObjectReference
+	TargetBindings []workv1alpha2.ObjectReference
 }

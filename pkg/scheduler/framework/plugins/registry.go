@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"github.com/karmada-io/karmada/pkg/scheduler/framework/plugins/accuratepreemption"
 	"github.com/karmada-io/karmada/pkg/scheduler/framework/plugins/apienablement"
 	"github.com/karmada-io/karmada/pkg/scheduler/framework/plugins/clusteraffinity"
 	"github.com/karmada-io/karmada/pkg/scheduler/framework/plugins/clustereviction"
@@ -29,11 +30,12 @@ import (
 // NewInTreeRegistry builds the registry with all the in-tree plugins.
 func NewInTreeRegistry() runtime.Registry {
 	return runtime.Registry{
-		apienablement.Name:    apienablement.New,
-		tainttoleration.Name:  tainttoleration.New,
-		clusteraffinity.Name:  clusteraffinity.New,
-		spreadconstraint.Name: spreadconstraint.New,
-		clusterlocality.Name:  clusterlocality.New,
-		clustereviction.Name:  clustereviction.New,
+		apienablement.Name:      apienablement.New,
+		tainttoleration.Name:    tainttoleration.New,
+		clusteraffinity.Name:    clusteraffinity.New,
+		spreadconstraint.Name:   spreadconstraint.New,
+		clusterlocality.Name:    clusterlocality.New,
+		clustereviction.Name:    clustereviction.New,
+		accuratepreemption.Name: accuratepreemption.New,
 	}
 }
