@@ -81,7 +81,8 @@ type Options struct {
 	SchedulerEstimatorKeyFile string
 	// SchedulerEstimatorCaFile SSL Certificate Authority file used to secure scheduler estimator communication.
 	SchedulerEstimatorCaFile string
-
+	// SchedulerEstimatorServiceNamespace specifies the namespace to be used for discovering scheduler estimator services.
+	SchedulerEstimatorServiceNamespace string
 	// EnableEmptyWorkloadPropagation represents whether workload with 0 replicas could be propagated to member clusters.
 	EnableEmptyWorkloadPropagation bool
 	ProfileOpts                    profileflag.Options
@@ -98,6 +99,9 @@ type Options struct {
 
 	// RateLimiterOpts contains the options for rate limiter.
 	RateLimiterOpts ratelimiterflag.Options
+
+	// Parallelism defines the amount of parallelism in algorithms for preemption. Must be greater than 0. Defaults to 16.
+	Parallelism int
 }
 
 // NewOptions builds an default scheduler options.
@@ -120,7 +124,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	if o == nil {
 		return
 	}
-
+	fs.StringVar(&o.SchedulerEstimatorServiceNamespace, "scheduler-estimator-service-namespace", util.NamespaceKarmadaSystem, "The namespace to be used for discovering scheduler estimator services.")
 	fs.BoolVar(&o.LeaderElection.LeaderElect, "leader-elect", true, "Enable leader election, which must be true when running multi instances.")
 	fs.StringVar(&o.LeaderElection.ResourceName, "leader-elect-resource-name", "karmada-scheduler", "The name of resource object that is used for locking during leader election.")
 	fs.StringVar(&o.LeaderElection.ResourceNamespace, "leader-elect-resource-namespace", util.NamespaceKarmadaSystem, "The namespace of resource object that is used for locking during leader election.")
@@ -157,6 +161,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringSliceVar(&o.Plugins, "plugins", []string{"*"},
 		fmt.Sprintf("A list of plugins to enable. '*' enables all build-in and customized plugins, 'foo' enables the plugin named 'foo', '*,-foo' disables the plugin named 'foo'.\nAll build-in plugins: %s.", strings.Join(frameworkplugins.NewInTreeRegistry().FactoryNames(), ",")))
 	fs.StringVar(&o.SchedulerName, "scheduler-name", scheduler.DefaultScheduler, "SchedulerName represents the name of the scheduler. default is 'default-scheduler'.")
+	fs.IntVar(&o.Parallelism, "parallelism", o.Parallelism, "Parallelism defines the amount of parallelism in algorithms for preemption. Must be greater than 0. Defaults to 16.")
 	features.FeatureGate.AddFlag(fs)
 	o.ProfileOpts.AddFlags(fs)
 	o.RateLimiterOpts.AddFlags(fs)

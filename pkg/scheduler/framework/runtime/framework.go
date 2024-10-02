@@ -27,12 +27,14 @@ import (
 	"github.com/karmada-io/karmada/pkg/scheduler/framework"
 	"github.com/karmada-io/karmada/pkg/scheduler/metrics"
 	utilmetrics "github.com/karmada-io/karmada/pkg/util/metrics"
+	"k8s.io/klog/v2"
 )
 
 const (
 	filter                  = "Filter"
 	score                   = "Score"
 	scoreExtensionNormalize = "ScoreExtensionNormalize"
+	postFilter              = "PostFilter"
 )
 
 // frameworkImpl implements the Framework interface and is responsible for initializing and running scheduler
@@ -41,6 +43,7 @@ type frameworkImpl struct {
 	scorePluginsWeightMap map[string]int
 	filterPlugins         []framework.FilterPlugin
 	scorePlugins          []framework.ScorePlugin
+	postFilterPlugins     []framework.PostFilterPlugin
 
 	metricsRecorder *metricsRecorder
 }
@@ -72,8 +75,10 @@ func NewFramework(r Registry, opts ...Option) (framework.Framework, error) {
 	}
 	filterPluginsList := reflect.ValueOf(&f.filterPlugins).Elem()
 	scorePluginsList := reflect.ValueOf(&f.scorePlugins).Elem()
+	postFilterPluginsList := reflect.ValueOf(&f.postFilterPlugins).Elem()
 	filterType := filterPluginsList.Type().Elem()
 	scoreType := scorePluginsList.Type().Elem()
+	postFilterType := postFilterPluginsList.Type().Elem()
 
 	for name, factory := range r {
 		p, err := factory()
@@ -83,6 +88,7 @@ func NewFramework(r Registry, opts ...Option) (framework.Framework, error) {
 
 		addPluginToList(p, filterType, &filterPluginsList)
 		addPluginToList(p, scoreType, &scorePluginsList)
+		addPluginToList(p, postFilterType, &postFilterPluginsList)
 	}
 
 	return f, nil
@@ -188,4 +194,45 @@ func addPluginToList(plugin framework.Plugin, pluginType reflect.Type, pluginLis
 		newPlugins := reflect.Append(*pluginList, reflect.ValueOf(plugin))
 		pluginList.Set(newPlugins)
 	}
+}
+
+func (frw *frameworkImpl) HasPostFilterPlugins() bool {
+	return len(frw.postFilterPlugins) > 0
+}
+
+// If any of the result is not success, the cluster is not suited for the resource.
+func (frw *frameworkImpl) RunPostFilterPlugins(
+	ctx context.Context,
+	bindingSpec *workv1alpha2.ResourceBindingSpec,
+	clusters []*clusterv1alpha1.Cluster,
+) (preemptionTargets *framework.PreemptionTargets, result *framework.Result) {
+	startTime := time.Now()
+	defer func() {
+		metrics.FrameworkExtensionPointDuration.WithLabelValues(postFilter, result.Code().String()).Observe(utilmetrics.DurationInSeconds(startTime))
+	}()
+	preemptionTargets = &framework.PreemptionTargets{
+		TargetBindings: []workv1alpha2.ObjectReference{},
+	}
+	for _, p := range frw.postFilterPlugins {
+		candidates, result := frw.runPostFilterPlugin(ctx, p, bindingSpec, clusters)
+		if !result.IsSuccess() {
+			return nil, framework.AsResult(fmt.Errorf("failed to run plugin %q: %w", p.Name(), result.AsError()))
+		}
+		if candidates == nil {
+			klog.Infof("candidates is nill")
+			continue
+		}
+		klog.Infof("candidates: %v", candidates)
+		if len(preemptionTargets.TargetBindings) == 0 || len(candidates.TargetBindings) < len(preemptionTargets.TargetBindings) {
+			preemptionTargets = candidates
+		}
+	}
+	return preemptionTargets, framework.NewResult(framework.Success)
+}
+
+func (frw *frameworkImpl) runPostFilterPlugin(ctx context.Context, pl framework.PostFilterPlugin, spec *workv1alpha2.ResourceBindingSpec, clusters []*clusterv1alpha1.Cluster) (*framework.PreemptionTargets, *framework.Result) {
+	startTime := time.Now()
+	preemptionTargets, result := pl.PostFilter(ctx, spec, clusters)
+	frw.metricsRecorder.observePluginDurationAsync(score, pl.Name(), result, utilmetrics.DurationInSeconds(startTime))
+	return preemptionTargets, result
 }

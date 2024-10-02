@@ -73,13 +73,15 @@ func calAvailableReplicas(clusters []*clusterv1alpha1.Cluster, spec *workv1alpha
 	estimators := estimatorclient.GetReplicaEstimators()
 	ctx := context.WithValue(context.TODO(), util.ContextKeyObject,
 		fmt.Sprintf("kind=%s, name=%s/%s", spec.Resource.Kind, spec.Resource.Namespace, spec.Resource.Name))
+	klog.Infof("Estimators: %v", estimators)
 	for name, estimator := range estimators {
+		klog.Infof("Estimator name: %s", name)
 		res, err := estimator.MaxAvailableReplicas(ctx, clusters, spec.ReplicaRequirements)
 		if err != nil {
 			klog.Errorf("Max cluster available replicas error: %v", err)
 			continue
 		}
-		klog.V(4).Infof("Invoked MaxAvailableReplicas of estimator %s for workload(%s, kind=%s, %s): %v", name,
+		klog.Infof("Invoked MaxAvailableReplicas of estimator %s for workload(%s, kind=%s, %s): %v", name,
 			spec.Resource.APIVersion, spec.Resource.Kind, namespacedKey, res)
 		for i := range res {
 			if res[i].Replicas == estimatorclient.UnauthenticReplica {

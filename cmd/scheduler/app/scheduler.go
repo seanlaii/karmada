@@ -167,6 +167,7 @@ func run(opts *options.Options, stopChan <-chan struct{}, registryOptions ...Opt
 
 	sched, err := scheduler.NewScheduler(dynamicClientSet, karmadaClient, kubeClientSet,
 		scheduler.WithOutOfTreeRegistry(outOfTreeRegistry),
+		scheduler.WithSchedulerEstimatorServiceNamespace(opts.SchedulerEstimatorServiceNamespace),
 		scheduler.WithEnablePriorityQueue(opts.EnablePriorityQueue),
 		scheduler.WithEnableSchedulerEstimator(opts.EnableSchedulerEstimator),
 		scheduler.WithDisableSchedulerEstimatorInPullMode(opts.DisableSchedulerEstimatorInPullMode),
@@ -177,6 +178,7 @@ func run(opts *options.Options, stopChan <-chan struct{}, registryOptions ...Opt
 		scheduler.WithEnableSchedulerPlugin(opts.Plugins),
 		scheduler.WithSchedulerName(opts.SchedulerName),
 		scheduler.WithRateLimiterOptions(opts.RateLimiterOpts),
+		scheduler.WithParallelism(opts.Parallelism),
 	)
 	if err != nil {
 		return fmt.Errorf("couldn't create scheduler: %w", err)

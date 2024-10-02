@@ -22,6 +22,10 @@ package v1alpha1
 // ClusterResourceBindingLister.
 type ClusterResourceBindingListerExpansion interface{}
 
+// FederatedPriorityClassListerExpansion allows custom methods to be added to
+// FederatedPriorityClassLister.
+type FederatedPriorityClassListerExpansion interface{}
+
 // ResourceBindingListerExpansion allows custom methods to be added to
 // ResourceBindingLister.
 type ResourceBindingListerExpansion interface{}
