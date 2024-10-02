@@ -81,7 +81,8 @@ type Options struct {
 	SchedulerEstimatorKeyFile string
 	// SchedulerEstimatorCaFile SSL Certificate Authority file used to secure scheduler estimator communication.
 	SchedulerEstimatorCaFile string
-
+	// SchedulerEstimatorServiceNamespace specifies the namespace to be used for discovering scheduler estimator services.
+	SchedulerEstimatorServiceNamespace string
 	// EnableEmptyWorkloadPropagation represents whether workload with 0 replicas could be propagated to member clusters.
 	EnableEmptyWorkloadPropagation bool
 	ProfileOpts                    profileflag.Options
@@ -123,7 +124,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	if o == nil {
 		return
 	}
-
+	fs.StringVar(&o.SchedulerEstimatorServiceNamespace, "scheduler-estimator-service-namespace", util.NamespaceKarmadaSystem, "The namespace to be used for discovering scheduler estimator services.")
 	fs.BoolVar(&o.LeaderElection.LeaderElect, "leader-elect", true, "Enable leader election, which must be true when running multi instances.")
 	fs.StringVar(&o.LeaderElection.ResourceName, "leader-elect-resource-name", "karmada-scheduler", "The name of resource object that is used for locking during leader election.")
 	fs.StringVar(&o.LeaderElection.ResourceNamespace, "leader-elect-resource-namespace", util.NamespaceKarmadaSystem, "The namespace of resource object that is used for locking during leader election.")

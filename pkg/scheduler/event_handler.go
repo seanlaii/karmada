@@ -165,13 +165,16 @@ func (s *Scheduler) onResourceBindingUpdate(old, cur interface{}) {
 
 	if s.enablePriorityQueue {
 		federatedPriorityClass, err := s.getFederatedPriorityClassFromObject(cur)
+		var priority int32
 		if err != nil {
 			klog.Errorf(err.Error())
-			return
+			priority = 10
+		} else {
+			priority = federatedPriorityClass.Value
 		}
 		s.queue.Add(priorityqueue.DataWithPriority{
 			Key:      key,
-			Priority: int(federatedPriorityClass.Value),
+			Priority: int(priority),
 		})
 	} else {
 		s.queue.Add(key)
@@ -421,15 +424,16 @@ func (s *Scheduler) getFederatedPriorityClassFromObject(obj interface{}) (*v1alp
 		return nil, fmt.Errorf("unsupported object type: %T", obj)
 	}
 
-	klog.Infoln("priorityClassName: ", priorityClassName)
-	if priorityClassName != "test-priority-class" {
+	if priorityClassName == "" {
 		priorityClassName = "test-priority-class"
 	}
+	klog.Infoln("priorityClassName: ", priorityClassName)
 
 	federatedPriorityClass, err := s.federatedPriorityClassLister.Get(priorityClassName)
 	if err != nil {
 		err = fmt.Errorf("couldn't get priority class for object %#v: %v", obj, err)
 		return nil, err
 	}
+	klog.Infoln("federatedPriorityClass: ", federatedPriorityClass)
 	return federatedPriorityClass, nil
 }
