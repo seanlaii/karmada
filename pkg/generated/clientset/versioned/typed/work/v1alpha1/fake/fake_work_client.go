@@ -32,6 +32,10 @@ func (c *FakeWorkV1alpha1) ClusterResourceBindings() v1alpha1.ClusterResourceBin
 	return &FakeClusterResourceBindings{c}
 }
 
+func (c *FakeWorkV1alpha1) FederatedPriorityClasses() v1alpha1.FederatedPriorityClassInterface {
+	return &FakeFederatedPriorityClasses{c}
+}
+
 func (c *FakeWorkV1alpha1) ResourceBindings(namespace string) v1alpha1.ResourceBindingInterface {
 	return &FakeResourceBindings{c, namespace}
 }

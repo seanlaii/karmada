@@ -35,6 +35,8 @@ import (
 // ScheduleAlgorithm is the interface that should be implemented to schedule a resource to the target clusters.
 type ScheduleAlgorithm interface {
 	Schedule(context.Context, *workv1alpha2.ResourceBindingSpec, *workv1alpha2.ResourceBindingStatus, *ScheduleAlgorithmOption) (scheduleResult ScheduleResult, err error)
+	HasPostFilterPlugins() bool
+	FindPreemptionTargets(ctx context.Context, spec *workv1alpha2.ResourceBindingSpec, clusters []*clusterv1alpha1.Cluster) (*framework.PreemptionTargets, error)
 }
 
 // ScheduleAlgorithmOption represents the option for ScheduleAlgorithm.
@@ -45,6 +47,7 @@ type ScheduleAlgorithmOption struct {
 // ScheduleResult includes the clusters selected.
 type ScheduleResult struct {
 	SuggestedClusters []workv1alpha2.TargetCluster
+	FeasibleClusters  []*clusterv1alpha1.Cluster
 }
 
 type genericScheduler struct {
@@ -86,6 +89,7 @@ func (g *genericScheduler) Schedule(
 			Diagnosis:      diagnosis,
 		}
 	}
+	result.FeasibleClusters = feasibleClusters
 	klog.V(4).Infof("Feasible clusters found: %v", feasibleClusters)
 
 	clustersScore, err := g.prioritizeClusters(ctx, g.scheduleFramework, spec, feasibleClusters)
@@ -182,4 +186,17 @@ func (g *genericScheduler) selectClusters(clustersScore framework.ClusterScoreLi
 func (g *genericScheduler) assignReplicas(clusters []*clusterv1alpha1.Cluster, spec *workv1alpha2.ResourceBindingSpec,
 	status *workv1alpha2.ResourceBindingStatus) ([]workv1alpha2.TargetCluster, error) {
 	return AssignReplicas(clusters, spec, status)
+}
+
+func (g *genericScheduler) FindPreemptionTargets(ctx context.Context, spec *workv1alpha2.ResourceBindingSpec,
+	clusters []*clusterv1alpha1.Cluster) (*framework.PreemptionTargets, error) {
+	startTime := time.Now()
+	defer metrics.ScheduleStep(metrics.ScheduleStepPreempt, startTime)
+
+	preemptionTargets, result := g.scheduleFramework.RunPostFilterPlugins(ctx, spec, clusters)
+	return preemptionTargets, result.AsError()
+}
+
+func (g *genericScheduler) HasPostFilterPlugins() bool {
+	return g.scheduleFramework.HasPostFilterPlugins()
 }

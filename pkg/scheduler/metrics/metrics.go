@@ -55,6 +55,8 @@ const (
 	ScheduleStepSelect = "Select"
 	// ScheduleStepAssignReplicas means the step in generic scheduler to assign replicas
 	ScheduleStepAssignReplicas = "AssignReplicas"
+	// SchedulePreempt means the step in generic scheduler to assign replicas
+	ScheduleStepPreempt = "Preempt"
 )
 
 var (

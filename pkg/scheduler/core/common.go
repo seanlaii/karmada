@@ -46,7 +46,6 @@ func AssignReplicas(
 ) ([]workv1alpha2.TargetCluster, error) {
 	startTime := time.Now()
 	defer metrics.ScheduleStep(metrics.ScheduleStepAssignReplicas, startTime)
-
 	if len(clusters) == 0 {
 		return nil, fmt.Errorf("no clusters available to schedule")
 	}

@@ -29,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -48,6 +49,7 @@ import (
 	karmadaclientset "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
 	informerfactory "github.com/karmada-io/karmada/pkg/generated/informers/externalversions"
 	clusterlister "github.com/karmada-io/karmada/pkg/generated/listers/cluster/v1alpha1"
+	federatedlister "github.com/karmada-io/karmada/pkg/generated/listers/work/v1alpha1"
 	worklister "github.com/karmada-io/karmada/pkg/generated/listers/work/v1alpha2"
 	schedulercache "github.com/karmada-io/karmada/pkg/scheduler/cache"
 	"github.com/karmada-io/karmada/pkg/scheduler/core"
@@ -60,6 +62,7 @@ import (
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/grpcconnection"
 	"github.com/karmada-io/karmada/pkg/util/helper"
+	"github.com/karmada-io/karmada/pkg/util/lifted/scheduler/framework/parallelize"
 	utilmetrics "github.com/karmada-io/karmada/pkg/util/metrics"
 )
 
@@ -86,13 +89,15 @@ const (
 
 // Scheduler is the scheduler schema, which is used to schedule a specific resource to specific clusters
 type Scheduler struct {
-	DynamicClient        dynamic.Interface
-	KarmadaClient        karmadaclientset.Interface
-	KubeClient           kubernetes.Interface
-	bindingLister        worklister.ResourceBindingLister
-	clusterBindingLister worklister.ClusterResourceBindingLister
-	clusterLister        clusterlister.ClusterLister
-	informerFactory      informerfactory.SharedInformerFactory
+	DynamicClient                dynamic.Interface
+	KarmadaClient                karmadaclientset.Interface
+	KubeClient                   kubernetes.Interface
+	bindingLister                worklister.ResourceBindingLister
+	federatedPriorityClassLister federatedlister.FederatedPriorityClassLister
+	clusterBindingLister         worklister.ClusterResourceBindingLister
+	clusterLister                clusterlister.ClusterLister
+	informerFactory              informerfactory.SharedInformerFactory
+	parallelizer                 parallelize.Parallelizer
 
 	// clusterReconcileWorker reconciles cluster changes to trigger corresponding
 	// ResourceBinding/ClusterResourceBinding rescheduling.
@@ -109,6 +114,7 @@ type Scheduler struct {
 	enableSchedulerEstimator            bool
 	disableSchedulerEstimatorInPullMode bool
 	schedulerEstimatorCache             *estimatorclient.SchedulerEstimatorCache
+	schedulerEstimatorServiceNamespace  string
 	schedulerEstimatorServicePrefix     string
 	schedulerEstimatorWorker            util.AsyncWorker
 	schedulerEstimatorClientConfig      *grpcconnection.ClientConfig
@@ -126,6 +132,8 @@ type schedulerOptions struct {
 	disableSchedulerEstimatorInPullMode bool
 	// schedulerEstimatorTimeout specifies the timeout period of calling the accurate scheduler estimator service.
 	schedulerEstimatorTimeout metav1.Duration
+	// schedulerEstimatorServiceNamespace specifies the namespace to be used for discovering scheduler estimator services.
+	schedulerEstimatorServiceNamespace string
 	// SchedulerEstimatorServicePrefix presents the prefix of the accurate scheduler estimator service name.
 	schedulerEstimatorServicePrefix string
 	// schedulerName is the name of the scheduler. Default is "default-scheduler".
@@ -140,6 +148,8 @@ type schedulerOptions struct {
 	RateLimiterOptions ratelimiterflag.Options
 	// schedulerEstimatorClientConfig contains the configuration of GRPC.
 	schedulerEstimatorClientConfig *grpcconnection.ClientConfig
+	// Parallelism defines the amount of parallelism in algorithms for preemption. Must be greater than 0. Defaults to 16.
+	parallelism int
 }
 
 // Option configures a Scheduler
@@ -149,6 +159,20 @@ type Option func(*schedulerOptions)
 func WithEnablePriorityQueue(enablePriorityQueue bool) Option {
 	return func(o *schedulerOptions) {
 		o.enablePriorityQueue = enablePriorityQueue
+	}
+}
+
+// WithSchedulerEstimatorServiceNamespace sets the schedulerEstimatorServiceNamespace for the scheduler
+func WithSchedulerEstimatorServiceNamespace(schedulerEstimatorServiceNamespace string) Option {
+	return func(o *schedulerOptions) {
+		o.schedulerEstimatorServiceNamespace = schedulerEstimatorServiceNamespace
+	}
+}
+
+// WithEnableSchedulerEstimator sets the enableSchedulerEstimator for scheduler
+func WithParallelism(parallelism int) Option {
+	return func(o *schedulerOptions) {
+		o.parallelism = parallelism
 	}
 }
 
@@ -243,6 +267,7 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 	}
 	clock := clock.RealClock{}
 	queueName := "scheduler-queue"
+	var federatedPriorityClassLister federatedlister.FederatedPriorityClassLister
 	var rateLimitingQueueConfig workqueue.RateLimitingQueueConfig
 	if options.enablePriorityQueue {
 		rateLimitingQueueConfig = workqueue.RateLimitingQueueConfig{
@@ -261,6 +286,7 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 				},
 			),
 		}
+		federatedPriorityClassLister = factory.Work().V1alpha1().FederatedPriorityClasses().Lister()
 	} else {
 		rateLimitingQueueConfig = workqueue.RateLimitingQueueConfig{Name: queueName}
 	}
@@ -279,16 +305,18 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 	}
 
 	sched := &Scheduler{
-		DynamicClient:        dynamicClient,
-		KarmadaClient:        karmadaClient,
-		KubeClient:           kubeClient,
-		bindingLister:        bindingLister,
-		clusterBindingLister: clusterBindingLister,
-		clusterLister:        clusterLister,
-		informerFactory:      factory,
-		queue:                queue,
-		Algorithm:            algorithm,
-		schedulerCache:       schedulerCache,
+		DynamicClient:                dynamicClient,
+		KarmadaClient:                karmadaClient,
+		KubeClient:                   kubeClient,
+		bindingLister:                bindingLister,
+		clusterBindingLister:         clusterBindingLister,
+		clusterLister:                clusterLister,
+		informerFactory:              factory,
+		queue:                        queue,
+		Algorithm:                    algorithm,
+		schedulerCache:               schedulerCache,
+		parallelizer:                 parallelize.NewParallelizer(options.parallelism),
+		federatedPriorityClassLister: federatedPriorityClassLister,
 	}
 
 	sched.clusterReconcileWorker = util.NewAsyncWorker(util.Options{
@@ -307,6 +335,7 @@ func NewScheduler(dynamicClient dynamic.Interface, karmadaClient karmadaclientse
 			KeyFunc:       nil,
 			ReconcileFunc: sched.reconcileEstimatorConnection,
 		}
+		sched.schedulerEstimatorServiceNamespace = options.schedulerEstimatorServiceNamespace
 		sched.schedulerEstimatorWorker = util.NewAsyncWorker(schedulerEstimatorWorkerOptions)
 		schedulerEstimator := estimatorclient.NewSchedulerEstimator(sched.schedulerEstimatorCache, options.schedulerEstimatorTimeout.Duration)
 		estimatorclient.RegisterSchedulerEstimator(schedulerEstimator)
@@ -549,6 +578,62 @@ func (s *Scheduler) scheduleResourceBindingWithClusterAffinity(rb *workv1alpha2.
 	var fitErr *framework.FitError
 	// in case of no cluster error, can not return but continue to patch(cleanup) the result.
 	if err != nil && !errors.As(err, &fitErr) {
+		klog.Infoln("feasible clusters: ", scheduleResult.FeasibleClusters)
+		if s.Algorithm.HasPostFilterPlugins() && len(scheduleResult.FeasibleClusters) > 0 {
+			klog.Infoln("There are registered PostFilter plugins, so perform preemption")
+			testFlag := false
+			var preemptionTargets *framework.PreemptionTargets
+			var preemptionErr error
+
+			if testFlag {
+				var selector labels.Selector
+				if selector, preemptionErr = metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"test-preemption-label": "should-be-preempt"}}); preemptionErr != nil {
+					klog.Error("Find selector error", preemptionErr)
+					return preemptionErr
+				}
+				bindings, preemptionErr := s.bindingLister.ResourceBindings(rb.Namespace).List(selector)
+				if preemptionErr != nil {
+					klog.Error("Find preemptee bindings error", preemptionErr)
+					return preemptionErr
+				}
+				targetBindings := make([]workv1alpha2.ObjectReference, len(bindings))
+				for i, binding := range bindings {
+					klog.Infof("Find preemptee binding: %v", binding)
+					targetBinding := workv1alpha2.ObjectReference{
+						APIVersion: rb.APIVersion,
+						Kind:       workv1alpha2.ResourceKindResourceBinding,
+						Namespace:  binding.Namespace,
+						Name:       binding.Name,
+						UID:        binding.UID,
+					}
+					targetBindings[i] = targetBinding
+				}
+				preemptionTargets = &framework.PreemptionTargets{
+					TargetBindings: targetBindings,
+				}
+			} else {
+				preemptionTargets, preemptionErr = s.Algorithm.FindPreemptionTargets(context.TODO(), &rb.Spec, scheduleResult.FeasibleClusters)
+				if preemptionErr != nil {
+					klog.Errorf("Failed finding preemption targets forResourceBinding(%s/%s): %v", rb.Namespace, rb.Name, err)
+					err = utilerrors.NewAggregate([]error{err, preemptionErr})
+				}
+			}
+
+			klog.Infof("Find preemptionTargets targetbindings: %v", preemptionTargets.TargetBindings)
+			if len(preemptionTargets.TargetBindings) > 0 {
+				preemptionErr := s.issuePreemption(workv1alpha2.ObjectReference{
+					APIVersion: rb.APIVersion,
+					Kind:       rb.Kind,
+					Namespace:  rb.GetNamespace(),
+					Name:       rb.GetName(),
+					UID:        rb.GetUID(),
+				}, preemptionTargets.TargetBindings)
+				if preemptionErr != nil {
+					err = utilerrors.NewAggregate([]error{err, preemptionErr})
+				}
+			}
+		}
+
 		s.recordScheduleResultEventForResourceBinding(rb, nil, err)
 		klog.Errorf("Failed scheduling ResourceBinding(%s/%s): %v", rb.Namespace, rb.Name, err)
 		return err
@@ -798,7 +883,8 @@ func (s *Scheduler) handleErr(err error, key interface{}) {
 		return
 	}
 
-	s.queue.AddRateLimited(key)
+	s.queue.AddAfter(key, 60*time.Second)
+	// s.queue.AddRateLimited(key)
 	metrics.CountSchedulerBindings(metrics.ScheduleAttemptFailure)
 }
 
@@ -807,6 +893,7 @@ func (s *Scheduler) reconcileEstimatorConnection(key util.QueueKey) error {
 	if !ok {
 		return fmt.Errorf("failed to reconcile estimator connection as invalid key: %v", key)
 	}
+	klog.Infoln("reconcileEstimatorConnection")
 
 	cluster, err := s.clusterLister.Get(name)
 	if err != nil {
@@ -819,8 +906,14 @@ func (s *Scheduler) reconcileEstimatorConnection(key util.QueueKey) error {
 	if cluster.Spec.SyncMode == clusterv1alpha1.Pull && s.disableSchedulerEstimatorInPullMode {
 		return nil
 	}
+	klog.Infoln("clusterLister")
 
-	return estimatorclient.EstablishConnection(s.KubeClient, name, s.schedulerEstimatorCache, s.schedulerEstimatorServicePrefix, s.schedulerEstimatorClientConfig)
+	serviceInfo := estimatorclient.SchedulerEstimatorServiceInfo{
+		Name:       name,
+		Namespace:  s.schedulerEstimatorServiceNamespace,
+		NamePrefix: s.schedulerEstimatorServicePrefix,
+	}
+	return estimatorclient.EstablishConnection(s.KubeClient, serviceInfo, s.schedulerEstimatorCache, s.schedulerEstimatorClientConfig)
 }
 
 func (s *Scheduler) establishEstimatorConnections() {
@@ -833,7 +926,14 @@ func (s *Scheduler) establishEstimatorConnections() {
 		if clusterList.Items[i].Spec.SyncMode == clusterv1alpha1.Pull && s.disableSchedulerEstimatorInPullMode {
 			continue
 		}
-		if err = estimatorclient.EstablishConnection(s.KubeClient, clusterList.Items[i].Name, s.schedulerEstimatorCache, s.schedulerEstimatorServicePrefix, s.schedulerEstimatorClientConfig); err != nil {
+		serviceInfo := estimatorclient.SchedulerEstimatorServiceInfo{
+			Name:       clusterList.Items[i].Name,
+			Namespace:  s.schedulerEstimatorServiceNamespace,
+			NamePrefix: s.schedulerEstimatorServicePrefix,
+		}
+		klog.Infoln("establishEstimatorConnections")
+
+		if err = estimatorclient.EstablishConnection(s.KubeClient, serviceInfo, s.schedulerEstimatorCache, s.schedulerEstimatorClientConfig); err != nil {
 			klog.Error(err)
 		}
 	}
@@ -996,4 +1096,66 @@ func targetClustersToString(tcs []workv1alpha2.TargetCluster) string {
 		tcsStrs = append(tcsStrs, fmt.Sprintf("%s:%d", cluster.Name, cluster.Replicas))
 	}
 	return strings.Join(tcsStrs, ", ")
+}
+
+func (s *Scheduler) issuePreemption(preemptorBinding workv1alpha2.ObjectReference, preemptionTargets []workv1alpha2.ObjectReference) error {
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	errCh := parallelize.NewErrorChannel()
+	klog.Infoln("preemption start")
+	preemptBindings := func(index int) {
+		target := preemptionTargets[index]
+
+		klog.Infof("target: %v", target)
+		switch target.Kind {
+		case workv1alpha2.ResourceKindResourceBinding:
+			resourceBinding, err := s.KarmadaClient.WorkV1alpha2().ResourceBindings(target.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
+			if err != nil {
+				errCh.SendErrorWithCancel(err, cancel)
+				return
+			}
+			if err := s.KarmadaClient.WorkV1alpha2().ResourceBindings(target.Namespace).Delete(ctx, target.Name, metav1.DeleteOptions{}); err != nil {
+				errCh.SendErrorWithCancel(err, cancel)
+				return
+			}
+			ref := &corev1.ObjectReference{
+				Kind:       resourceBinding.Spec.Resource.Kind,
+				APIVersion: resourceBinding.Spec.Resource.APIVersion,
+				Namespace:  resourceBinding.Spec.Resource.Namespace,
+				Name:       resourceBinding.Spec.Resource.Name,
+				UID:        resourceBinding.Spec.Resource.UID,
+			}
+
+			s.eventRecorder.Event(resourceBinding, corev1.EventTypeWarning, "Preempted", fmt.Sprintf("Preempted by resourceBinding %v", preemptorBinding))
+			s.eventRecorder.Event(ref, corev1.EventTypeWarning, "Preempted", fmt.Sprintf("Preempted by resourceBinding %v", preemptorBinding))
+
+		case workv1alpha2.ResourceKindClusterResourceBinding:
+			clusterResourceBinding, err := s.KarmadaClient.WorkV1alpha2().ClusterResourceBindings().Get(ctx, target.Name, metav1.GetOptions{})
+			if err != nil {
+				errCh.SendErrorWithCancel(err, cancel)
+				return
+			}
+			if err := s.KarmadaClient.WorkV1alpha2().ClusterResourceBindings().Delete(ctx, target.Name, metav1.DeleteOptions{}); err != nil {
+				errCh.SendErrorWithCancel(err, cancel)
+				return
+			}
+			ref := &corev1.ObjectReference{
+				Kind:       clusterResourceBinding.Spec.Resource.Kind,
+				APIVersion: clusterResourceBinding.Spec.Resource.APIVersion,
+				Namespace:  clusterResourceBinding.Spec.Resource.Namespace,
+				Name:       clusterResourceBinding.Spec.Resource.Name,
+				UID:        clusterResourceBinding.Spec.Resource.UID,
+			}
+
+			s.eventRecorder.Event(clusterResourceBinding, corev1.EventTypeWarning, "Preempted", fmt.Sprintf("Preempted by clusterResourceBinding %v", clusterResourceBinding))
+			s.eventRecorder.Event(ref, corev1.EventTypeWarning, "Preempted", fmt.Sprintf("Preempted by object %v", ref))
+
+		default:
+			errCh.SendErrorWithCancel(fmt.Errorf("unsupported binding kind: %s", target.Kind), cancel)
+			return
+		}
+	}
+
+	s.parallelizer.Until(ctx, len(preemptionTargets), preemptBindings)
+	return errCh.ReceiveError()
 }
