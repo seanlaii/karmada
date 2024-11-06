@@ -34,6 +34,7 @@ import (
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	"github.com/karmada-io/karmada/pkg/scheduler/metrics"
+	"github.com/karmada-io/karmada/pkg/scheduler/priorityqueue"
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/fedinformer"
 	"github.com/karmada-io/karmada/pkg/util/gclient"
@@ -118,8 +119,14 @@ func (s *Scheduler) onResourceBindingAdd(obj interface{}) {
 		klog.Errorf("couldn't get key for object %#v: %v", obj, err)
 		return
 	}
-
-	s.queue.Add(key)
+	if s.enablePriorityQueue {
+		s.queue.Add(priorityqueue.DataWithPriority{
+			Key:      key,
+			Priority: 1,
+		})
+	} else {
+		s.queue.Add(key)
+	}
 	metrics.CountSchedulerBindings(metrics.BindingAdd)
 }
 
@@ -147,7 +154,14 @@ func (s *Scheduler) onResourceBindingUpdate(old, cur interface{}) {
 		return
 	}
 
-	s.queue.Add(key)
+	if s.enablePriorityQueue {
+		s.queue.Add(priorityqueue.DataWithPriority{
+			Key:      key,
+			Priority: 1,
+		})
+	} else {
+		s.queue.Add(key)
+	}
 	metrics.CountSchedulerBindings(metrics.BindingUpdate)
 }
 
@@ -158,7 +172,14 @@ func (s *Scheduler) onResourceBindingRequeue(binding *workv1alpha2.ResourceBindi
 		return
 	}
 	klog.Infof("Requeue ResourceBinding(%s/%s) due to event(%s).", binding.Namespace, binding.Name, event)
-	s.queue.Add(key)
+	if s.enablePriorityQueue {
+		s.queue.Add(priorityqueue.DataWithPriority{
+			Key:      key,
+			Priority: 1,
+		})
+	} else {
+		s.queue.Add(key)
+	}
 	metrics.CountSchedulerBindings(event)
 }
 
@@ -169,7 +190,14 @@ func (s *Scheduler) onClusterResourceBindingRequeue(clusterResourceBinding *work
 		return
 	}
 	klog.Infof("Requeue ClusterResourceBinding(%s) due to event(%s).", clusterResourceBinding.Name, event)
-	s.queue.Add(key)
+	if s.enablePriorityQueue {
+		s.queue.Add(priorityqueue.DataWithPriority{
+			Key:      key,
+			Priority: 1,
+		})
+	} else {
+		s.queue.Add(key)
+	}
 	metrics.CountSchedulerBindings(event)
 }
 
