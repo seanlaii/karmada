@@ -68,7 +68,6 @@ linters:
         - all
         # Exclude the following checks temporarily.
         # Will fix the issues in the following PRs.
-        - "-QF1008"
         - "-ST1019"
         - "-ST1005"
         - "-QF1004"
